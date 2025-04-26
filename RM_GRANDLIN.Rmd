@@ -1,0 +1,395 @@
+---
+title: "Étude du cours du CAC40"
+author: "Elliot Rault-Maisonneuve, Benoit Grandlin"
+date: "2025-01-16"
+output: html_document
+---
+
+```{r, include = FALSE}
+#Import des librairies
+library(dplyr)
+library(readxl)
+library(xts)
+library(ggplot2)
+library(astsa)
+library(urca)
+library(tidyverse)
+library(forecast)
+```
+
+```{r, include = FALSE}
+#Import des données
+CAC40 <- read_excel("data/Data_TS.xlsx")
+calendrier_sans_we <- read_excel('data/dates_jf.xlsx')
+calendrier_vc_noel <- read_excel("data/dates_vc_noel.xlsx")
+colnames(calendrier_sans_we) <- "Date"
+```
+
+
+# Introduction 
+
+Dans ce projet, nous nous intéressons à l'analyse et à la prévision de l'indice boursier CAC 40, principal indice de référence de la Bourse de Paris. L’objectif est double : étudier le comportement temporel de la série des cours d’ouverture du CAC 40 et réaliser des prévisions sur le mois de janvier 2025 à l’aide de différents modèles statistiques.
+
+L'analyse débute par un pré-traitement des données, incluant le nettoyage, le traitement des valeurs manquantes et l'intégration de données calendaires (jours fériés, vacances de Noël, etc.). Ensuite, nous explorons la structure temporelle de la série, en mettant l’accent sur sa saisonnalité, sa tendance et son caractère potentiellement non stationnaire. Des tests statistiques comme le test de Dickey-Fuller augmenté (ADF) et le test de Phillips-Perron viennent étayer nos observations graphiques.
+
+Pour la partie modélisation, nous comparons trois approches classiques de prévision des séries temporelles :
+
+le modèle ARIMA,
+
+la méthode de Holt-Winters,
+
+et l’algorithme Prophet développé par Facebook.
+
+Chaque méthode est évaluée en termes de cohérence avec les données réelles de janvier 2025, ce qui permet de juger de leur pertinence dans un contexte boursier.
+
+
+# Etude des données manquantes, valeurs aberrantes, extrêmes, jours ouvrés ...
+```{r}
+#Ajout des dates jours fériés
+CAC40 <- left_join(calendrier_sans_we, CAC40, by = "Date")
+
+#Suppresssion des variables inutilisées
+CAC40 <- CAC40[,c(1,3)]
+
+#Combien de données manquantes/aberrantes/extrêmes ? (Jours fériés sur 2 ans)
+summary(CAC40)
+
+remplace_NA <- function(data) {
+  # Vérifie que le data.frame a au moins deux colonnes
+  if (ncol(data) < 2) {
+    stop("Le data.frame doit avoir au moins deux colonnes (Date et Valeur).")
+  }
+  
+  # Parcourt chaque ligne
+  for (i in 1:nrow(data)) {
+    # Si une valeur est manquante
+    if (is.na(data[i, 2])) {
+      # Vérifie que les indices autour de la ligne actuelle sont valides
+      indices <- c((i-3):(i-1), (i+1):(i+3))
+      indices <- indices[indices > 0 & indices <= nrow(data)] # Filtre les indices valides
+      
+      # Calcule la moyenne des valeurs valides autour de la valeur manquante
+      valeurs_valides <- data[indices, 2]
+      valeurs_valides <- valeurs_valides[!is.na(valeurs_valides)]
+      
+      # Remplace la valeur manquante par la moyenne si possible
+      if (length(valeurs_valides) > 0) {
+        data[i, 2] <- mean(valeurs_valides)
+      } else {
+        warning(paste("Impossible de remplacer la valeur NA à la ligne", i, ": pas de données valides autour."))
+      }
+    }
+  }
+  
+  return(data)
+}
+
+
+#Remplacement des données manquantes par la moyenne des valeurs autour
+CAC40 <- remplace_NA(CAC40)
+
+
+#Transfo en série temporelle (5 jours par semaine)
+CAC40_xts <- xts(x = CAC40$Ouverture, order.by = CAC40$Date, start=c(2023, 1) ,frequency = 5)
+
+#Saisonnalité journalière
+# 261 jours de bourse/an
+```
+
+
+# Inspection schéma : additif ou multiplicatif
+
+```{r}
+plot(as.xts(CAC40_xts))
+```
+
+En observant le graphique, nous constatons que la série semble évoluer de manière non stationnaire, avec des variations significatives à la fois en tendance et en amplitude. Aucune composante additive ou multiplicative claire ne ressort visuellement. Il est également possible que la variance fluctue au fil du temps, renforçant l'hypothèse de non-stationnarité. Une analyse plus approfondie (comme un test de stationnarité ou une décomposition) serait nécessaire pour confirmer ces observations.
+
+Même si ces observations peuvent être faites graphiquement, il sera nécessaire d'appliquer différents tests statistiques pour les vérifier. Ces tests, comme le test de stationnarité (ADF, KPSS, etc.) ou encore des analyses complémentaires sur la décomposition de la série, permettront de confirmer ou d'infirmer les hypothèses initiales concernant la non-stationnarité et l'absence de modèle additif ou multiplicatif.
+
+# Étude de la saisonnalité
+
+```{r}
+#Graphique de normalité des valeurs du CAC40
+qqnorm(CAC40_xts, main = "CAC40")
+qqline(CAC40_xts, col = "red")
+
+head(CAC40_xts, 5)
+#Correlogramme
+acf2(CAC40_xts)
+
+
+#Saisonnalité
+CAC40_ts <- ts(CAC40[,2], start=c(2023, 1) ,frequency = 261)
+head(CAC40_ts, 5)
+ggseasonplot(CAC40_ts, polar = TRUE)
+ggsubseriesplot(CAC40_ts)
+
+# Ajouter une colonne pour le numéro du jour dans l'année
+CAC40 <- CAC40 %>%
+  mutate(DayOfYear = as.numeric(format(Date, "%j")),  # Jour dans l'année (1 à 365)
+         Year = as.factor(format(Date, "%Y")))  # Année en facteur
+
+# Tracer le graphique sans ts()
+ggplot(CAC40, aes(x = DayOfYear, y = Ouverture, color = Year, group = Year)) +
+  geom_line() +
+  ggtitle("Graphique saisonnier du CAC40") +
+  ylab("Valeur du CAC40") +
+  xlab("Jours de l'année") +
+  theme_minimal()
+
+```
+ACF (Autocorrelation Function - Graphique du haut) :
+
+On observe une autocorrélation significative à tous les lags, ce qui indique une forte dépendance des valeurs passées sur les valeurs présentes.
+Les barres sont bien au-dessus des intervalles de confiance (en pointillés bleus), ce qui montre que la série n'est pas stationnaire.
+La décroissance progressive (et non un découpage rapide) suggère une tendance dans la série.
+
+PACF (Partial Autocorrelation Function - Graphique du bas) :
+
+On remarque un fort premier pic significatif suivi d’une diminution rapide.
+Cela suggère qu’un modèle AR(1) (AutoRegressive de lag 1) pourrait être approprié pour modéliser cette série.
+Comme les autres lags ne sont pas significatifs, cela suggère que seule la première valeur passée influence la valeur présente de manière directe.
+
+En comparant visuellement les variations journalières du CAC 40 sur deux années (2023 et 2024), aucun motif récurrent ou comportement similaire ne se dégage clairement. Contrairement à des séries économiques classiques (comme les ventes mensuelles ou la consommation d’énergie), l’indice boursier est principalement influencé par des facteurs conjoncturels, économiques ou géopolitiques, qui ne suivent pas nécessairement un cycle annuel. Ainsi, bien que des effets calendaires ponctuels puissent exister, aucune saisonnalité marquée ou régulière ne ressort de l’analyse graphique, ce qui justifie le recours à des modèles de prévision sans composante saisonnière explicite.
+
+
+# Tests de racine unitaire :
+
+```{r}
+#Tests de racine unitaire pour savoir le nombre de différenciation
+cac_statio <- diff(CAC40_ts, lag=261) 
+cac_statio |> autoplot() + ggtitle("CAC40 - Série Stationnarisée (avec simple différenciation)") + ylab("Valeur du CAC40 stationnarisée 1 fois")
+
+#Tests ADF 
+summary(ur.df(cac_statio, type = "trend", selectlags="AIC")) # stat de test : -2,4899 > -3,42 (seuil critique 5%)
+summary(ur.df(cac_statio, type = "drift", selectlags="AIC")) # stat de test : -1,7974 > -2,87
+summary(ur.df(cac_statio, type = "none", selectlags="AIC")) # stat de test : -1,8325 > -1,95
+
+# Tous les résultats indiquent non stationnarité
+
+#Tests de Phillips Perron
+summary(ur.pp(cac_statio,model = "trend", type = "Z-tau", lags = "short")) # stat de test : -2.7878 > -3.43
+
+summary(ur.pp(cac_statio, model = "constant", type = "Z-tau", lags = "short")) # stat de test : -2.068 > -2.86
+
+#On remarque avec les différents tests qu'il faut différencier la série une deuxième fois.
+
+cac_statio2 <- diff(diff(CAC40_ts), lag = 261)
+cac_statio2 |> autoplot() + ggtitle("CAC40 - Série Stationnarisée (avec double différenciation)") + ylab("Valeur du CAC40 stationnarisée 2 fois")
+
+summary(ur.df(cac_statio2, type = "trend", selectlags="AIC")) # stat de test : -11.75 < -3.42
+summary(ur.df(cac_statio2, type = "drift", selectlags="AIC")) # stat de test : -11.77 <	-2.87
+summary(ur.df(cac_statio2, type = "none", selectlags="AIC")) # stat de test : -11.75 < -1.95
+```
+
+Afin d’évaluer la stationnarité de la série du CAC40 et de déterminer le nombre de différenciations nécessaires avant modélisation, plusieurs tests de racine unitaire ont été appliqués.
+
+Dans un premier temps, une première différenciation saisonnière (lag = 261, correspondant au nombre approximatif de jours de bourse par an) est effectuée. La série obtenue est ensuite soumise à plusieurs tests classiques :
+
+Le test de Dickey-Fuller augmenté (ADF) avec différentes spécifications (avec tendance, avec dérive, sans constante).
+
+Le test de Phillips-Perron, également sous les hypothèses de tendance et de constante.
+
+Les résultats indiquent que, malgré cette première transformation, la série reste non stationnaire. Une seconde différenciation (non saisonnière cette fois) est donc appliquée, permettant d’obtenir une série stationnaire, comme le suggèrent les diagnostics visuels et les tests.
+
+Cette étape est essentielle pour garantir la validité des modèles de prévision tels qu’ARIMA ou Holt-Winters, qui nécessitent une série stationnaire en entrée.
+
+# Prévisions
+
+## Import des vraies données du mois de janvier 2025
+
+```{r}
+CAC40_janvier <- read_excel("data/dates_pred.xlsx")
+
+CAC40_janvier$Date <- as.POSIXct(CAC40_janvier$Date)
+```
+
+
+## ARIMA
+
+```{r, echo = FALSE}
+# 1. Modélisation et prévision sur la série deux fois différenciée
+model_arima <- auto.arima(cac_statio2)
+forecast_stationary <- forecast(model_arima, h = 30)
+autoplot(forecast_stationary)
+
+# 2. Inversion des différences pour revenir à l’échelle originale
+
+# Étape 1 : Inverser la première différence (non-saisonnière)
+# On récupère la dernière valeur de la série une seule fois différenciée
+last_diff1 <- tail(diff(CAC40_ts), 261)  # saisonnalité corrigée
+last_diff1_value <- as.vector(tail(last_diff1, 1))
+
+# On cumule les prévisions pour remonter à l’échelle de diff(CAC40_ts)
+inv_diff1 <- cumsum(as.vector(forecast_stationary$mean)) + last_diff1_value
+
+# Étape 2 : Inverser la saisonnalité (différence saisonnière)
+# On récupère les 30 dernières valeurs de CAC40_ts pour faire l'ajustement saisonnier
+last_seasonal_base <- as.vector(tail(CAC40_ts, 261))[232:261]  # Les 30 derniers points
+
+# On additionne la base saisonnière pour revenir à l’échelle originale
+inv_seasonal <- inv_diff1 + last_seasonal_base
+
+# 3. Création des dates de prévision
+last_date <- as.Date(tail(CAC40$Date, 1))
+forecast_dates <- seq(from = last_date + 1, by = "day", length.out = 30)
+
+# 4. Création du DataFrame final
+final_forecast_ARIMA <- data.frame(
+  Date = forecast_dates,
+  Predicted_CAC40 = inv_seasonal
+)
+
+final_forecast_ARIMA$Date <- as.POSIXct(final_forecast_ARIMA$Date)
+
+# Données réelles pour le contexte du graphique
+last_real <- data.frame(Date = CAC40$Date, Value = CAC40$Ouverture)
+
+ggplot() +
+  geom_line(data = last_real, aes(x = Date, y = Value, color = "Réel"), size = 0.5) +  # données réelles
+  geom_line(data = final_forecast_ARIMA, aes(x = Date, y = Predicted_CAC40, color = "Prévision ARIMA"), size = 0.5) +  # prévisions ARIMA
+  geom_line(data = CAC40_janvier, aes(x = Date, y = Ouverture, color = "Réel Janvier 2025"), size = 0.5) +  # données réelles janvier 2025
+  labs(title = "Prévision du CAC40 (retournée à l’échelle réelle)",
+       x = "Date", y = "Valeur du CAC40") +
+  scale_color_manual(values = c("Réel" = "black", 
+                                "Prévision ARIMA" = "darkblue", 
+                                "Réel Janvier 2025" = "darkred")) +
+  theme_minimal() +
+  theme(legend.title = element_blank())  # Enlever le titre de la légende
+
+
+```
+
+La prévision obtenue via le modèle ARIMA s’avère relativement cohérente avec la tendance observée. Le modèle propose une évolution modérée, sans rupture brutale, ce qui traduit une bonne prise en compte de la dynamique globale de la série. Toutefois, il n'anticipe pas la forte croissance observée en janvier 2025. Ce décalage peut s'expliquer par le caractère linéaire et conservateur du modèle, peu réactif aux changements soudains de tendance.
+
+
+
+## Holt-Winters
+
+```{r, echo = FALSE}
+# 1. Ajustement du modèle Holt-Winters sur la série stationnarisée
+hw_model <- HoltWinters(cac_statio2, beta = TRUE, gamma = FALSE)  # pas de saisonnalité ici, déjà corrigée
+forecast_stationary <- forecast(hw_model, h = 30)
+autoplot(forecast_stationary)
+
+# Étape 1 : Inverser la première différence
+last_diff1 <- tail(diff(CAC40_ts), 261)  # 261 = fréquence saisonnière
+last_diff1_value <- as.vector(tail(last_diff1, 1))
+inv_diff1 <- cumsum(as.vector(forecast_stationary$mean)) + last_diff1_value
+
+# Étape 2 : Inverser la saisonnalité
+last_seasonal_base <- as.vector(tail(CAC40_ts, 261))[232:261]  # les 30 derniers points
+inv_seasonal <- inv_diff1 + last_seasonal_base
+
+# Création des dates futures
+last_date <- as.Date(tail(CAC40$Date, 1))
+forecast_dates <- seq(from = last_date + 1, by = "day", length.out = 30)
+
+# DataFrame final des prévisions
+final_forecast_HW <- data.frame(
+  Date = forecast_dates,
+  Predicted_CAC40 = inv_seasonal
+)
+
+# Données réelles pour affichage
+last_real <- data.frame(Date = CAC40$Date, Value = CAC40$Ouverture)
+
+final_forecast_HW$Date <- as.POSIXct(final_forecast_HW$Date)
+
+ggplot() +
+  geom_line(data = last_real, aes(x = Date, y = Value, color = "Réel"), size = 0.5) +
+  geom_line(data = final_forecast_HW, aes(x = Date, y = Predicted_CAC40, color = "Prévision Holt-Winters"), size = 0.5) +
+  geom_line(data = CAC40_janvier, aes(x = Date, y = Ouverture, color = "Réel Janvier 2025"), size = 0.5) +
+  labs(title = "Prévision CAC40 avec Holt-Winters (reprojetée à l’échelle réelle)",
+       x = "Date", y = "Valeur du CAC40") +
+  scale_color_manual(values = c("Réel" = "black", 
+                                "Prévision Holt-Winters" = "darkblue", 
+                                "Réel Janvier 2025" = "darkred")) +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+
+```
+
+La méthode de Holt-Winters, appliquée ici sans composante saisonnière (gamma = FALSE), propose une trajectoire fortement haussière, quasi exponentielle. Si cette courbe suit la direction générale de la tendance observée, elle surestime clairement l’ampleur de la hausse. Cela montre que le modèle accorde une importance excessive à la pente récente, sans réellement ajuster la dynamique à la réalité du marché, ce qui peut poser problème dans un contexte boursier où les mouvements ne sont pas toujours réguliers.
+
+## Prophet
+
+```{r, echo = FALSE}
+library(prophet)
+library(dplyr)
+
+# Prophet a besoin de colonnes : ds (date) et y (valeur)
+prophet_df <- CAC40 %>%
+  select(ds = Date, y = Ouverture) %>%
+  filter(!is.na(y)) %>%
+  mutate(ds = as.POSIXct(ds))  
+
+head(prophet_df)
+
+# Création du modèle Prophet
+m <- prophet(prophet_df)
+
+# Création du futur data.frame pour les 30 prochains jours
+future <- make_future_dataframe(m, periods = 30)
+
+# Prévision
+forecast <- predict(m, future)
+
+# Affichage automatique avec les intervalles de confiance
+plot(m, forecast) +
+  ggtitle("Prévision du CAC40 avec Prophet")
+
+ggplot(forecast, aes(x = ds, y = yhat)) +
+  geom_line(aes(color = "Prévision Prophet"), size = 0.5) +  # prévisions Prophet
+  geom_ribbon(aes(ymin = yhat_lower, ymax = yhat_upper, fill = "Intervalle de confiance"), alpha = 0.2) +
+  geom_line(data = prophet_df, aes(x = ds, y = y, color = "Réel"), size = 0.5) +  # données réelles
+  geom_line(data = CAC40_janvier, aes(x = Date, y = Ouverture, color = "Réel Janvier 2025"), size = 0.5) +  # données réelles janvier 2025
+  labs(title = "Prévision du CAC40 avec Prophet",
+       x = "Date", y = "Valeur du CAC40") +
+  scale_color_manual(values = c("Réel" = "black", 
+                                "Prévision Prophet" = "darkblue", 
+                                "Réel Janvier 2025" = "darkred")) +
+  scale_fill_manual(values = c("Intervalle de confiance" = "skyblue")) +
+  theme_minimal() +
+  theme(legend.title = element_blank())  # Enlever le titre de la légende
+
+
+```
+
+Le modèle Prophet, conçu pour capter des effets de tendance et de saisonnalité, se révèle ici le moins pertinent. Contrairement aux observations réelles, il prévoit une légère baisse pour janvier 2025. Ce comportement peut être dû à une mauvaise détection de tendance récente ou à une absence d’effets saisonniers marqués dans la série, ce qui limite l’intérêt d’un modèle initialement pensé pour les séries présentant des motifs saisonniers clairs.
+
+# Synthèse
+
+Les trois méthodes explorées (ARIMA, Holt-Winters et Prophet) révèlent des performances contrastées. ARIMA se montre le plus raisonnable, reproduisant une dynamique proche de la réalité, bien qu’un peu trop prudente. Holt-Winters capte bien la tendance haussière mais la surestime, ce qui peut induire en erreur dans des contextes volatils. Enfin, Prophet, qui repose en partie sur l’hypothèse d’une saisonnalité récurrente, échoue à détecter la hausse observée et s’écarte nettement des données réelles. Cette comparaison met en évidence l’importance de choisir un modèle adapté au comportement spécifique des séries financières, souvent guidées par des facteurs exogènes imprévisibles plutôt que par des motifs cycliques réguliers.
+
+# Extraction des données pertinentes pour le Power BI
+
+```{r}
+#Série de base
+#write.csv(CAC40, "output/CAC40.csv", row.names = FALSE)
+
+#Prévision ARIMA
+#write.csv(final_forecast_ARIMA, "output/final_forecast_ARIMA.csv", row.names = FALSE)
+
+#Prévision Holt_Winters
+#write.csv(final_forecast_HW, "output/final_forecast_HW.csv", row.names = FALSE)
+
+
+#Prévision Prophet
+#write.csv(forecast, "output/final_forecast_prophet.csv", row.names = FALSE)
+```
+
+
+# Conclusion
+
+À travers cette étude, nous avons évalué trois approches classiques de prévision des séries temporelles appliquées à l’indice boursier CAC 40 : ARIMA, Holt-Winters, et Prophet. Chacune de ces méthodes présente des caractéristiques spécifiques et des performances variables face à la nature volatile et peu saisonnière des données financières.
+
+Le modèle ARIMA s’est avéré le plus robuste, reproduisant de manière relativement fidèle la dynamique globale de la série, bien qu’avec une certaine prudence. Sa capacité à modéliser la tendance sans excès de volatilité en fait un outil pertinent dans un contexte où les mouvements brusques restent difficiles à anticiper.
+
+La méthode Holt-Winters, bien qu’elle capte efficacement la tendance haussière récente, tend à surestimer l’amplitude des variations, traduisant une sensibilité accrue aux dynamiques récentes. Ce comportement peut conduire à des prévisions trop optimistes, en particulier sur des séries financières sujettes à des retournements rapides.
+
+Enfin, le modèle Prophet, pourtant réputé pour sa gestion automatique des tendances et des saisonnalités, s’est montré inadapté ici. L’absence de motifs saisonniers marqués dans la série limite son efficacité, et le modèle n’a pas su capter la hausse constatée en janvier 2025.
+
+Cette comparaison met en lumière l’importance cruciale du choix du modèle en fonction de la nature de la série analysée. Dans un environnement boursier, où les comportements sont souvent guidés par des facteurs exogènes, géopolitiques ou économiques, les modèles simples mais flexibles comme ARIMA peuvent s’avérer plus performants que des outils plus complexes basés sur des hypothèses de régularité.
